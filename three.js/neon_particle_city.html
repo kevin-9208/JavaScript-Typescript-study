@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>霓虹粒子城市 · Neon Particle City</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  html,body{ margin:0; padding:0; width:100%; height:100%; background:#05030a; overflow:hidden; }
+  canvas{ display:block; }
+  #hud{
+    position:fixed; top:20px; left:20px; z-index:5;
+    font-family:'Share Tech Mono', monospace; color:#ff3ec8;
+    font-size:12px; letter-spacing:.12em; line-height:1.9;
+    text-shadow:0 0 8px rgba(255,62,200,0.6);
+    pointer-events:none; opacity:0.85;
+  }
+  #hud .t1{ font-size:15px; color:#eafcff; letter-spacing:.2em; }
+  #hud .dim{ color:#5a3c78; }
+  #hud .cy{ color:#3ef2ff; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div class="t1">霓虹粒子城市</div>
+  <div class="dim">BUILDINGS <span class="cy" id="hud-buildings">0</span> &nbsp;|&nbsp; FLOW <span class="cy" id="hud-flow">0</span></div>
+  <div class="dim">拖拽旋转视角 · 移动鼠标改变光流方向</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ============================================================
+   基础场景 / 相机 / 渲染器
+============================================================ */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0518, 0.014);
+
+function skyTexture(){
+  const c = document.createElement('canvas'); c.width=2; c.height=256;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0,0,0,256);
+  g.addColorStop(0,'#05030a'); g.addColorStop(0.6,'#150a2e'); g.addColorStop(1,'#3a1250');
+  ctx.fillStyle=g; ctx.fillRect(0,0,2,256);
+  return new THREE.CanvasTexture(c);
+}
+scene.background = skyTexture();
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 800);
+camera.position.set(38, 26, 46);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 6, 0);
+controls.minDistance = 12;
+controls.maxDistance = 140;
+controls.maxPolarAngle = Math.PI * 0.49; // 不允许穿到地面以下
+
+/* ============================================================
+   灯光
+============================================================ */
+scene.add(new THREE.AmbientLight(0x2a1a44, 0.9));
+const magentaLight = new THREE.PointLight(0xff3ec8, 3.5, 90, 2);
+magentaLight.position.set(-30, 18, -20);
+scene.add(magentaLight);
+const cyanLight = new THREE.PointLight(0x3ef2ff, 3.5, 90, 2);
+cyanLight.position.set(30, 18, 20);
+scene.add(cyanLight);
+
+/* ============================================================
+   地面：霓虹网格
+============================================================ */
+function gridTexture(){
+  const c = document.createElement('canvas'); c.width=c.height=512;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#0a0518'; ctx.fillRect(0,0,512,512);
+  ctx.strokeStyle = 'rgba(62,242,255,0.35)'; ctx.lineWidth = 2;
+  for (let i=0;i<=512;i+=32){
+    ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,512); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(512,i); ctx.stroke();
+  }
+  return new THREE.CanvasTexture(c);
+}
+const gTex = gridTexture(); gTex.wrapS = gTex.wrapT = THREE.RepeatWrapping; gTex.repeat.set(10,10);
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(240, 240),
+  new THREE.MeshStandardMaterial({ map:gTex, color:0x666666, roughness:0.95, metalness:0.1 })
+);
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
+
+/* ============================================================
+   建筑群（BoxGeometry + 霓虹描边）
+============================================================ */
+const NEON_COLORS = [0xff3ec8, 0x3ef2ff, 0xb14bff, 0xffd23f];
+const CITY_HALF = 46;
+const CELL = 6.5;
+const buildingsGroup = new THREE.Group();
+scene.add(buildingsGroup);
+
+const winPositions = []; // 用于粒子化"窗口灯光"
+const winColors = [];
+
+function addBuilding(x, z){
+  const w = 2.6 + Math.random()*2.2;
+  const d = 2.6 + Math.random()*2.2;
+  const isSpire = Math.random() < 0.12;
+  const h = isSpire ? 22 + Math.random()*20 : 3 + Math.random()*14;
+
+  const mat = new THREE.MeshStandardMaterial({ color:0x0c0a18, roughness:0.6, metalness:0.4 });
+  const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  box.position.set(x, h/2, z);
+  buildingsGroup.add(box);
+
+  // 霓虹描边（EdgesGeometry 线框）
+  const edgeColor = NEON_COLORS[Math.floor(Math.random()*NEON_COLORS.length)];
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(box.geometry),
+    new THREE.LineBasicMaterial({ color: edgeColor, transparent:true, opacity:0.85 })
+  );
+  edges.position.copy(box.position);
+  buildingsGroup.add(edges);
+
+  // 顶部霓虹环（点缀）
+  if (Math.random() < 0.4){
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.max(w,d)*0.42, 0.06, 6, 16), new THREE.MeshBasicMaterial({ color: edgeColor }));
+    ring.rotation.x = Math.PI/2;
+    ring.position.set(x, h+0.1, z);
+    buildingsGroup.add(ring);
+  }
+
+  // 在四个侧面随机生成"窗口灯光"采样点，稍后作为粒子系统渲染
+  const winCount = Math.floor(h * 1.6);
+  for (let i=0;i<winCount;i++){
+    const side = Math.floor(Math.random()*4);
+    const yy = 0.6 + Math.random()*(h-1.2);
+    let px, pz;
+    if (side===0){ px = x - w/2 - 0.02; pz = z + (Math.random()-0.5)*d; }
+    else if (side===1){ px = x + w/2 + 0.02; pz = z + (Math.random()-0.5)*d; }
+    else if (side===2){ px = x + (Math.random()-0.5)*w; pz = z - d/2 - 0.02; }
+    else { px = x + (Math.random()-0.5)*w; pz = z + d/2 + 0.02; }
+    winPositions.push(px, yy, pz);
+    const c = new THREE.Color(Math.random()<0.5 ? 0xfff2b0 : (Math.random()<0.5?0x3ef2ff:0xff3ec8));
+    winColors.push(c.r, c.g, c.b);
+  }
+  return h;
+}
+
+for (let gx=-CITY_HALF; gx<CITY_HALF; gx+=CELL){
+  for (let gz=-CITY_HALF; gz<CITY_HALF; gz+=CELL){
+    if (Math.random() < 0.32) continue; // 留出街道空隙
+    const jx = gx + (Math.random()-0.5)*2.2;
+    const jz = gz + (Math.random()-0.5)*2.2;
+    if (Math.hypot(jx,jz) < 5) continue; // 中央留出广场
+    addBuilding(jx, jz);
+  }
+}
+document.getElementById('hud-buildings').textContent = buildingsGroup.children.length;
+
+/* ---------------- 窗口灯光粒子系统（模拟城市灯光） ---------------- */
+function glowSprite(hex){
+  const c = document.createElement('canvas'); c.width=c.height=64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32,32,0,32,32,32);
+  g.addColorStop(0,'rgba(255,255,255,0.95)');
+  g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,64,64);
+  return new THREE.CanvasTexture(c);
+}
+const winGeo = new THREE.BufferGeometry();
+winGeo.setAttribute('position', new THREE.Float32BufferAttribute(winPositions, 3));
+winGeo.setAttribute('color', new THREE.Float32BufferAttribute(winColors, 3));
+const winMat = new THREE.PointsMaterial({
+  size:0.28, map:glowSprite(), transparent:true, vertexColors:true,
+  blending:THREE.AdditiveBlending, depthWrite:false
+});
+const windowLights = new THREE.Points(winGeo, winMat);
+scene.add(windowLights);
+// 用于窗口"闪烁"效果的基础透明度
+const winBaseOpacity = 0.95;
+
+/* ============================================================
+   流动的光线粒子（数据流 / 悬浮光尘）
+============================================================ */
+const FLOW_COUNT = 900;
+const flowPos = new Float32Array(FLOW_COUNT*3);
+const flowVel = new Float32Array(FLOW_COUNT*3);
+const flowColor = new Float32Array(FLOW_COUNT*3);
+const flowMaxY = 32;
+const cNeon1 = new THREE.Color(0x3ef2ff);
+const cNeon2 = new THREE.Color(0xff3ec8);
+
+for (let i=0;i<FLOW_COUNT;i++){
+  flowPos[i*3]   = (Math.random()-0.5) * CITY_HALF*2;
+  flowPos[i*3+1] = Math.random() * flowMaxY;
+  flowPos[i*3+2] = (Math.random()-0.5) * CITY_HALF*2;
+  flowVel[i*3+1] = 0.6 + Math.random()*1.4; // 基础上升速度
+  const mix = Math.random();
+  const c = cNeon1.clone().lerp(cNeon2, mix);
+  flowColor[i*3]=c.r; flowColor[i*3+1]=c.g; flowColor[i*3+2]=c.b;
+}
+const flowGeo = new THREE.BufferGeometry();
+flowGeo.setAttribute('position', new THREE.BufferAttribute(flowPos, 3));
+flowGeo.setAttribute('color', new THREE.BufferAttribute(flowColor, 3));
+const flowMat = new THREE.PointsMaterial({
+  size:0.22, map:glowSprite(), transparent:true, vertexColors:true, opacity:0.85,
+  blending:THREE.AdditiveBlending, depthWrite:false
+});
+const flowParticles = new THREE.Points(flowGeo, flowMat);
+scene.add(flowParticles);
+document.getElementById('hud-flow').textContent = FLOW_COUNT;
+
+/* ============================================================
+   鼠标影响粒子流动方向
+============================================================ */
+const mouse = { x:0, y:0 };
+const flowDir = new THREE.Vector2(0, 0); // 平滑后的水平流动方向 (x,z)
+addEventListener('mousemove', e => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = (e.clientY / innerHeight) * 2 - 1;
+});
+addEventListener('touchmove', e => {
+  const t = e.touches[0];
+  mouse.x = (t.clientX / innerWidth) * 2 - 1;
+  mouse.y = (t.clientY / innerHeight) * 2 - 1;
+}, { passive:true });
+
+/* ============================================================
+   动画循环
+============================================================ */
+const clock = new THREE.Clock();
+
+function updateFlowParticles(dt){
+  // 鼠标位置平滑映射为水平流动方向
+  flowDir.x += ((mouse.x*3) - flowDir.x) * Math.min(1, dt*1.5);
+  flowDir.y += ((-mouse.y*3) - flowDir.y) * Math.min(1, dt*1.5);
+
+  const pos = flowGeo.attributes.position.array;
+  const half = CITY_HALF*2;
+  for (let i=0;i<FLOW_COUNT;i++){
+    const ix = i*3;
+    pos[ix]   += flowDir.x * dt;
+    pos[ix+2] += flowDir.y * dt;
+    pos[ix+1] += flowVel[ix+1] * dt;
+
+    // 超出高度范围则从地面重新升起
+    if (pos[ix+1] > flowMaxY){ pos[ix+1] = 0; }
+    // 水平方向环绕城市范围，形成连续流动
+    if (pos[ix]   >  CITY_HALF) pos[ix]   -= half;
+    if (pos[ix]   < -CITY_HALF) pos[ix]   += half;
+    if (pos[ix+2] >  CITY_HALF) pos[ix+2] -= half;
+    if (pos[ix+2] < -CITY_HALF) pos[ix+2] += half;
+  }
+  flowGeo.attributes.position.needsUpdate = true;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  updateFlowParticles(dt);
+
+  // 窗口灯光轻微闪烁
+  winMat.opacity = winBaseOpacity + Math.sin(t*3.0)*0.04;
+
+  // 双色点光源缓慢漂移，强化霓虹氛围
+  magentaLight.position.x = Math.sin(t*0.15) * 34;
+  magentaLight.position.z = Math.cos(t*0.15) * 34;
+  cyanLight.position.x = Math.sin(t*0.15 + Math.PI) * 34;
+  cyanLight.position.z = Math.cos(t*0.15 + Math.PI) * 34;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
